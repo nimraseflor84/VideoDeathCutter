@@ -32,7 +32,9 @@ class ExportWorker(QThread):
                 stdout=subprocess.DEVNULL,
                 text=True,
             )
+            stderr_lines: list[str] = []
             for line in proc.stderr:
+                stderr_lines.append(line)
                 if self._cancelled:
                     proc.terminate()
                     self.finished.emit(False, "Abgebrochen.")
@@ -52,7 +54,12 @@ class ExportWorker(QThread):
                 self.progress.emit(100)
                 self.finished.emit(True, "Export erfolgreich abgeschlossen.")
             else:
-                self.finished.emit(False, f"FFmpeg Fehler (Code {proc.returncode})")
+                # Letzte 20 Zeilen stderr für Diagnose
+                tail = "".join(stderr_lines[-20:]).strip()
+                self.finished.emit(
+                    False,
+                    f"FFmpeg Fehler (Code {proc.returncode})\n\n{tail}"
+                )
         except Exception as e:
             self.finished.emit(False, str(e))
 
@@ -294,6 +301,33 @@ class ExportDialog(QDialog):
         n_total = nv + na
         post = scale + pix_fmt
 
+        # When concatenating multiple video clips they must share the same size.
+        # Apply a per-clip normalize scale BEFORE concat; remove scale from post
+        # to avoid double-scaling.
+        if nv > 1 and v_clips:
+            _res_wh = {
+                "3840×2160 (4K)":    (3840, 2160),
+                "1920×1080 (1080p)": (1920, 1080),
+                "1280×720 (720p)":   (1280, 720),
+            }
+            _r = self._res_combo.currentText()
+            if _r in _res_wh:
+                _tw, _th = _res_wh[_r]
+            elif v_clips[0].media.width > 0 and v_clips[0].media.height > 0:
+                _tw, _th = v_clips[0].media.width, v_clips[0].media.height
+            else:
+                _tw, _th = 0, 0
+            if _tw > 0:
+                _norm = (
+                    f",scale={_tw}:{_th}:force_original_aspect_ratio=decrease"
+                    f",pad={_tw}:{_th}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+                )
+                post = pix_fmt  # scale already done per-clip
+            else:
+                _norm = ""
+        else:
+            _norm = ""
+
         if n_total == 0:
             raise RuntimeError("Keine Clips zum Exportieren vorhanden.")
 
@@ -347,7 +381,7 @@ class ExportDialog(QDialog):
                 src_trim = out_dur * clip.speed
                 vspeed = self._vspeed_filter(clip.speed)
                 fc_parts.append(
-                    f"[{i}:v]trim=duration={src_trim:.4f},setpts=PTS-STARTPTS{vspeed}[v{i}]"
+                    f"[{i}:v]trim=duration={src_trim:.4f},setpts=PTS-STARTPTS{vspeed}{_norm}[v{i}]"
                 )
                 if clip.media.has_audio and not clip.muted:
                     aspeed = self._aspeed_filter(clip.speed)
@@ -373,7 +407,7 @@ class ExportDialog(QDialog):
                 src_trim = out_dur * clip.speed
                 vspeed = self._vspeed_filter(clip.speed)
                 fc_parts.append(
-                    f"[{i}:v]trim=duration={src_trim:.4f},setpts=PTS-STARTPTS{vspeed}[v{i}]"
+                    f"[{i}:v]trim=duration={src_trim:.4f},setpts=PTS-STARTPTS{vspeed}{_norm}[v{i}]"
                 )
             concat_v_in = "".join(f"[v{i}]" for i in range(nv))
             if nv > 1:
@@ -430,6 +464,10 @@ class ExportDialog(QDialog):
         if not path:
             QMessageBox.warning(self, "Export", "Bitte Ausgabedatei wählen.")
             return
+        # Fehlende Extension → Format-Endung anhängen
+        if not os.path.splitext(path)[1]:
+            path += "." + self._format_combo.currentText().lower()
+            self._path_edit.setText(path)
         try:
             cmd, duration = self._build_cmd(path)
         except RuntimeError as e:

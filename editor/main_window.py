@@ -1,6 +1,9 @@
+import json
+import os
+
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QSplitter,
-    QMessageBox,
+    QMessageBox, QFileDialog,
 )
 from PyQt6.QtCore import Qt, pyqtSlot
 from PyQt6.QtGui import QAction, QKeyEvent, QDragEnterEvent, QDropEvent
@@ -44,6 +47,9 @@ class MainWindow(QMainWindow):
         # ── Datei ──────────────────────────────────────────────────────
         fm = mb.addMenu("Datei")
         self._a(fm, "Medien importieren…", "Ctrl+I", self._import_media)
+        fm.addSeparator()
+        self._a(fm, "Projekt speichern…", "Ctrl+S", self._save_project)
+        self._a(fm, "Projekt öffnen…",    "Ctrl+O", self._load_project)
         fm.addSeparator()
         self._a(fm, "Exportieren…", "Ctrl+E", self._open_export)
         fm.addSeparator()
@@ -251,6 +257,122 @@ class MainWindow(QMainWindow):
     def _on_loop_out(self, t: float):
         self._timeline.set_loop_markers(self._preview._loop_in, t,
                                         self._preview._loop_enabled)
+
+    # ------------------------------------------------------------------ project save / load
+
+    def _save_project(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Projekt speichern", os.path.expanduser("~"),
+            "VideoDeathCutter Project (*.vdc);;All Files (*)"
+        )
+        if not path:
+            return
+        if not path.endswith(".vdc"):
+            path += ".vdc"
+
+        media_list = []
+        for m in self._media_pool.media_files():
+            media_list.append({
+                "path": m.path,
+                "name": m.name,
+                "duration": m.duration,
+                "width": m.width,
+                "height": m.height,
+                "fps": m.fps,
+                "has_audio": m.has_audio,
+            })
+
+        clip_list = []
+        for c in self._timeline.clips():
+            clip_list.append({
+                "media_path": c.media.path,
+                "track": c.track,
+                "start_time": c.start_time,
+                "in_point": c.in_point,
+                "out_point": c.out_point,
+                "color": c.color,
+                "loop_count": c.loop_count,
+                "speed": c.speed,
+                "muted": c.muted,
+            })
+
+        data = {"version": 1, "media_pool": media_list, "timeline_clips": clip_list}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        self.statusBar().showMessage(f"Projekt gespeichert: {path}")
+
+    def _load_project(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Projekt öffnen", os.path.expanduser("~"),
+            "VideoDeathCutter Project (*.vdc);;All Files (*)"
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Fehler", f"Projektdatei konnte nicht gelesen werden:\n{e}")
+            return
+
+        if data.get("version", 0) != 1:
+            QMessageBox.warning(self, "Versionsfehler",
+                                "Unbekannte Projektversion – versuche trotzdem zu laden.")
+
+        # Build MediaFile objects; skip missing files
+        missing = []
+        media_by_path: dict[str, MediaFile] = {}
+        for m in data.get("media_pool", []):
+            p = m.get("path", "")
+            if not os.path.isfile(p):
+                missing.append(p)
+                continue
+            mf = MediaFile(
+                path=p,
+                name=m.get("name", os.path.basename(p)),
+                duration=m.get("duration", 0.0),
+                width=m.get("width", 0),
+                height=m.get("height", 0),
+                fps=m.get("fps", 0.0),
+                has_audio=m.get("has_audio", True),
+            )
+            media_by_path[p] = mf
+
+        if missing:
+            QMessageBox.warning(
+                self, "Fehlende Dateien",
+                "Folgende Mediendateien wurden nicht gefunden und übersprungen:\n\n"
+                + "\n".join(missing)
+            )
+
+        # Reset state
+        self._media_pool.clear()
+        self._timeline.set_clips([])
+
+        for mf in media_by_path.values():
+            self._media_pool.add_media_file(mf)
+
+        clips = []
+        for c in data.get("timeline_clips", []):
+            mp = c.get("media_path", "")
+            if mp not in media_by_path:
+                continue
+            clip = TimelineClip(
+                media=media_by_path[mp],
+                track=c.get("track", 0),
+                start_time=c.get("start_time", 0.0),
+                in_point=c.get("in_point", 0.0),
+                out_point=c.get("out_point", 0.0),
+                color=c.get("color", "#2a6496"),
+                loop_count=c.get("loop_count", 1),
+                speed=c.get("speed", 1.0),
+                muted=c.get("muted", False),
+            )
+            clips.append(clip)
+        self._timeline.set_clips(clips)
+        self._push_undo()
+        self.statusBar().showMessage(f"Projekt geladen: {path}")
 
     # ------------------------------------------------------------------ menu actions
 

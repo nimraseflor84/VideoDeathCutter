@@ -175,7 +175,8 @@ class PreviewPlayer(QWidget):
 
     def stop(self):
         self._user_stopped = True
-        self._player.stop()
+        self._player.pause()
+        self._player.setPosition(0)
         self._play_btn.setChecked(False)
         self._play_btn.setText("▶ Play")
 

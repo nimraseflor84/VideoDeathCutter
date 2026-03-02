@@ -157,9 +157,13 @@ class ExportDialog(QDialog):
         info.setStyleSheet("color:#888; font-size:11px;")
         layout.addWidget(info)
 
-        if not self._video_clips:
-            warn = QLabel("⚠  Keine Video-Clips in der Timeline.")
+        if not self._all_clips:
+            warn = QLabel("⚠  Keine Clips in der Timeline.")
             warn.setStyleSheet("color:#f80; font-size:12px;")
+            layout.addWidget(warn)
+        elif not self._video_clips:
+            warn = QLabel("ℹ  Nur Audio-Clips — Export ohne Video.")
+            warn.setStyleSheet("color:#88aaff; font-size:12px;")
             layout.addWidget(warn)
 
         layout.addStretch()
@@ -169,7 +173,7 @@ class ExportDialog(QDialog):
         self._export_btn = btn_box.addButton(
             "Exportieren", QDialogButtonBox.ButtonRole.AcceptRole)
         self._export_btn.clicked.connect(self._start_export)
-        self._export_btn.setEnabled(bool(self._video_clips))
+        self._export_btn.setEnabled(bool(self._video_clips or self._audio_clips))
         btn_box.addButton("Abbrechen", QDialogButtonBox.ButtonRole.RejectRole
                           ).clicked.connect(self.reject)
         layout.addWidget(btn_box)
@@ -190,6 +194,32 @@ class ExportDialog(QDialog):
             self._path_edit.setText(os.path.splitext(p)[0] + "." + fmt.lower())
 
     # ------------------------------------------------------------------ FFmpeg
+
+    @staticmethod
+    def _vspeed_filter(speed: float) -> str:
+        """Video speed filter appended after setpts=PTS-STARTPTS (empty if 1.0)."""
+        if abs(speed - 1.0) < 0.001:
+            return ""
+        return f",setpts=(1/{speed:.6f})*PTS"
+
+    @staticmethod
+    def _aspeed_filter(speed: float) -> str:
+        """Audio atempo filter chain (empty if 1.0).
+        atempo only accepts 0.5–2.0, so extreme speeds use chained filters.
+        """
+        if abs(speed - 1.0) < 0.001:
+            return ""
+        filters = []
+        s = speed
+        while s > 2.0 + 0.001:
+            filters.append("atempo=2.0")
+            s /= 2.0
+        while s < 0.5 - 0.001:
+            filters.append("atempo=0.5")
+            s *= 2.0
+        if abs(s - 1.0) > 0.001:
+            filters.append(f"atempo={s:.6f}")
+        return ("," + ",".join(filters)) if filters else ""
 
     def _build_cmd(self, output_path: str) -> tuple[list[str], float]:
         ffmpeg, _ = find_ffmpeg()
@@ -220,17 +250,16 @@ class ExportDialog(QDialog):
         video_dur = sum(c.duration for c in v_clips)
         audio_dur = sum(c.duration for c in a_clips)
 
-        # Effective target durations based on sync mode
         if sync_mode == 0:
             v_target = video_dur
             a_target = audio_dur
-        elif sync_mode == 1:  # loop video to fill audio
+        elif sync_mode == 1:
             v_target = audio_dur if audio_dur > 0 else video_dur
             a_target = audio_dur
-        elif sync_mode == 2:  # loop audio to fill video
+        elif sync_mode == 2:
             v_target = video_dur
             a_target = video_dur if video_dur > 0 else audio_dur
-        else:  # auto
+        else:
             longer = max(video_dur, audio_dur)
             v_target = longer
             a_target = longer
@@ -243,7 +272,6 @@ class ExportDialog(QDialog):
         for clip in v_clips:
             lc = clip.loop_count
             if sync_mode != 0:
-                # In loop-sync mode: loop every video clip infinitely, cut later
                 cmd += ["-stream_loop", "-1"]
             elif lc == -1:
                 cmd += ["-stream_loop", "-1"]
@@ -273,63 +301,65 @@ class ExportDialog(QDialog):
         fc_parts: list[str] = []
 
         if nv == 1 and na == 0:
-            # Single video clip (possibly looping) — simple case
             clip = v_clips[0]
-            if sync_mode != 0 or clip.loop_count != 1:
-                # Limit duration via trim in filter
+            needs_filter = sync_mode != 0 or clip.loop_count != 1 \
+                           or abs(clip.speed - 1.0) > 0.001
+            if needs_filter:
+                src_trim = v_target * clip.speed
+                vspeed = self._vspeed_filter(clip.speed)
                 fc_parts.append(
-                    f"[0:v]trim=duration={v_target:.4f},setpts=PTS-STARTPTS[tv]"
+                    f"[0:v]trim=duration={src_trim:.4f},setpts=PTS-STARTPTS{vspeed}[tv]"
                 )
                 if clip.media.has_audio and not clip.muted:
+                    aspeed = self._aspeed_filter(clip.speed)
                     fc_parts.append(
-                        f"[0:a]atrim=duration={v_target:.4f},asetpts=PTS-STARTPTS[ta]"
+                        f"[0:a]atrim=duration={src_trim:.4f},asetpts=PTS-STARTPTS{aspeed}[ta]"
                     )
                     if post:
                         fc_parts.append(f"[tv]{','.join(post)}[outv]")
-                        fc_parts.append("[ta]anull[outa]")
                     else:
                         fc_parts.append("[tv]null[outv]")
-                        fc_parts.append("[ta]anull[outa]")
+                    fc_parts.append("[ta]anull[outa]")
                 else:
                     if post:
                         fc_parts.append(f"[tv]{','.join(post)}[outv]")
                     else:
                         fc_parts.append("[tv]null[outv]")
                     fc_parts.append("anullsrc=r=44100:cl=stereo[outa]")
-
                 cmd += ["-filter_complex", ";".join(fc_parts),
                         "-map", "[outv]", "-map", "[outa]"]
             else:
-                # Completely normal single clip
-                vf = post
+                # Simple single clip, speed=1, no loop
+                vf = post[:]
                 if vf:
                     cmd += ["-vf", ",".join(vf)]
                 if clip.muted:
                     cmd += ["-an"]
                 else:
                     cmd += ["-c:a", "aac", "-b:a", "256k"]
-                cmd += ["-t", str(clip.duration)] + codec_args + crf_args
+                cmd += ["-t", str(clip.out_point - clip.in_point)] + codec_args + crf_args
                 cmd += ["-c:a", "aac", "-b:a", "256k", output_path]
                 return cmd, clip.duration
 
         elif nv >= 1 and na == 0:
-            # Multiple video clips, no separate audio
             for i, clip in enumerate(v_clips):
-                dur = v_target / nv if sync_mode != 0 else clip.duration
+                out_dur = v_target / nv if sync_mode != 0 else clip.duration
+                src_trim = out_dur * clip.speed
+                vspeed = self._vspeed_filter(clip.speed)
                 fc_parts.append(
-                    f"[{i}:v]trim=duration={dur:.4f},setpts=PTS-STARTPTS[v{i}]"
+                    f"[{i}:v]trim=duration={src_trim:.4f},setpts=PTS-STARTPTS{vspeed}[v{i}]"
                 )
                 if clip.media.has_audio and not clip.muted:
+                    aspeed = self._aspeed_filter(clip.speed)
                     fc_parts.append(
-                        f"[{i}:a]atrim=duration={dur:.4f},asetpts=PTS-STARTPTS[a{i}]"
+                        f"[{i}:a]atrim=duration={src_trim:.4f},asetpts=PTS-STARTPTS{aspeed}[a{i}]"
                     )
                 else:
                     fc_parts.append(
-                        f"anullsrc=r=44100:cl=stereo:d={dur:.4f}[a{i}]"
+                        f"anullsrc=r=44100:cl=stereo:d={out_dur:.4f}[a{i}]"
                     )
             concat_in = "".join(f"[v{i}][a{i}]" for i in range(nv))
-            concat_out = "[cv][outa]"
-            fc_parts.append(f"{concat_in}concat=n={nv}:v=1:a=1{concat_out}")
+            fc_parts.append(f"{concat_in}concat=n={nv}:v=1:a=1[cv][outa]")
             if post:
                 fc_parts.append(f"[cv]{','.join(post)}[outv]")
             else:
@@ -338,57 +368,57 @@ class ExportDialog(QDialog):
                     "-map", "[outv]", "-map", "[outa]"]
 
         elif nv >= 1 and na >= 1:
-            # Video + separate audio tracks
             for i, clip in enumerate(v_clips):
-                dur = v_target / nv if sync_mode in (1, 3) else clip.duration
+                out_dur = v_target / nv if sync_mode in (1, 3) else clip.duration
+                src_trim = out_dur * clip.speed
+                vspeed = self._vspeed_filter(clip.speed)
                 fc_parts.append(
-                    f"[{i}:v]trim=duration={dur:.4f},setpts=PTS-STARTPTS[v{i}]"
+                    f"[{i}:v]trim=duration={src_trim:.4f},setpts=PTS-STARTPTS{vspeed}[v{i}]"
                 )
             concat_v_in = "".join(f"[v{i}]" for i in range(nv))
             if nv > 1:
                 fc_parts.append(f"{concat_v_in}concat=n={nv}:v=1:a=0[cv]")
             else:
-                fc_parts.append(f"[v0]null[cv]")
+                fc_parts.append("[v0]null[cv]")
 
             for j, clip in enumerate(a_clips):
-                dur = a_target / na if sync_mode in (2, 3) else clip.duration
+                out_dur = a_target / na if sync_mode in (2, 3) else clip.duration
+                src_trim = out_dur * clip.speed
+                aspeed = self._aspeed_filter(clip.speed)
                 idx = nv + j
                 fc_parts.append(
-                    f"[{idx}:a]atrim=duration={dur:.4f},asetpts=PTS-STARTPTS[a{j}]"
+                    f"[{idx}:a]atrim=duration={src_trim:.4f},asetpts=PTS-STARTPTS{aspeed}[a{j}]"
                 )
             concat_a_in = "".join(f"[a{j}]" for j in range(na))
             if na > 1:
                 fc_parts.append(f"{concat_a_in}concat=n={na}:v=0:a=1[outa]")
             else:
-                fc_parts.append(f"[a0]anull[outa]")
+                fc_parts.append("[a0]anull[outa]")
 
             if post:
                 fc_parts.append(f"[cv]{','.join(post)}[outv]")
             else:
                 fc_parts.append("[cv]null[outv]")
-
             cmd += ["-filter_complex", ";".join(fc_parts),
                     "-map", "[outv]", "-map", "[outa]"]
 
         else:
             # Only audio clips
             for j, clip in enumerate(a_clips):
-                dur = a_target / na if sync_mode != 0 else clip.duration
+                out_dur = a_target / na if sync_mode != 0 else clip.duration
+                src_trim = out_dur * clip.speed
+                aspeed = self._aspeed_filter(clip.speed)
                 fc_parts.append(
-                    f"[{j}:a]atrim=duration={dur:.4f},asetpts=PTS-STARTPTS[a{j}]"
+                    f"[{j}:a]atrim=duration={src_trim:.4f},asetpts=PTS-STARTPTS{aspeed}[a{j}]"
                 )
             concat_a_in = "".join(f"[a{j}]" for j in range(na))
             if na > 1:
                 fc_parts.append(f"{concat_a_in}concat=n={na}:v=0:a=1[outa]")
             else:
-                fc_parts.append(f"[a0]anull[outa]")
-            cmd += ["-filter_complex", ";".join(fc_parts), "-map", "[outa]",
-                    "-vn"]
+                fc_parts.append("[a0]anull[outa]")
+            cmd += ["-filter_complex", ";".join(fc_parts), "-map", "[outa]", "-vn"]
             cmd += ["-c:a", "aac", "-b:a", "256k", output_path]
             return cmd, total_duration
-
-        # Apply speed per clip (simple: use setpts for video speed)
-        # (speed already factored into source_duration via model, trim handles it)
 
         cmd += codec_args + crf_args + ["-c:a", "aac", "-b:a", "256k", output_path]
         return cmd, total_duration

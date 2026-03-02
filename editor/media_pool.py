@@ -54,8 +54,13 @@ class MediaPool(QWidget):
             self,
             "Import Media",
             os.path.expanduser("~"),
-            "Media Files (*.mp4 *.mov *.mkv *.avi *.wmv *.flv *.m4v *.webm "
-            "*.ts *.mts *.m2ts *.mp3 *.aac *.wav *.flac *.m4a *.ogg);;All Files (*)",
+            "Media Files ("
+            "*.mp4 *.mov *.mkv *.avi *.wmv *.flv *.m4v *.webm "
+            "*.ts *.mts *.m2ts *.mpg *.mpeg *.m2v *.vob *.3gp *.3g2 "
+            "*.divx *.f4v *.rm *.rmvb *.ogv "
+            "*.mp3 *.aac *.wav *.flac *.m4a *.ogg "
+            "*.wma *.opus *.mp2 *.ac3 *.dts *.ra *.amr *.aiff *.aif *.ape *.mka"
+            ");;All Files (*)",
         )
         for path in paths:
             self._add_file(path)
@@ -124,3 +129,21 @@ class MediaPool(QWidget):
 
     def media_files(self) -> list[MediaFile]:
         return list(self._media_files)
+
+    def add_media_file(self, media: MediaFile):
+        """Add an already-constructed MediaFile directly (no probing)."""
+        if any(m.path == media.path for m in self._media_files):
+            return
+        self._media_files.append(media)
+        item = QListWidgetItem(f"{media.name}  [{media.duration_str()}]")
+        item.setData(Qt.ItemDataRole.UserRole, media)
+        item.setToolTip(
+            f"{media.path}\n{media.width}x{media.height} @ {media.fps:.2f}fps\n"
+            f"Duration: {media.duration_str()}"
+        )
+        self._list.addItem(item)
+
+    def clear(self):
+        """Empty the media pool completely."""
+        self._media_files.clear()
+        self._list.clear()

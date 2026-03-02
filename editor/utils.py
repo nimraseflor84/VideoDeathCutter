@@ -6,14 +6,38 @@ from typing import Optional
 
 def find_ffmpeg() -> tuple[str, str]:
     """Return (ffmpeg_path, ffprobe_path). Raises RuntimeError if not found."""
+    import sys
+    import os
+
+    candidates = []
+
+    # 1. PyInstaller bundle: ffmpeg is next to the executable
+    if getattr(sys, "frozen", False):
+        bundle_dir = os.path.dirname(sys.executable)
+        candidates.append(bundle_dir)
+
+    # 2. Common install locations (Homebrew Intel + Apple Silicon, MacPorts)
+    candidates += [
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/opt/local/bin",
+    ]
+
+    for folder in candidates:
+        ff = os.path.join(folder, "ffmpeg")
+        fp = os.path.join(folder, "ffprobe")
+        if os.path.isfile(ff) and os.path.isfile(fp):
+            return ff, fp
+
+    # 3. Fall back to system PATH
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
-    if not ffmpeg or not ffprobe:
-        raise RuntimeError(
-            "FFmpeg not found. Install via: brew install ffmpeg (macOS) "
-            "or winget install ffmpeg (Windows)"
-        )
-    return ffmpeg, ffprobe
+    if ffmpeg and ffprobe:
+        return ffmpeg, ffprobe
+
+    raise RuntimeError(
+        "FFmpeg nicht gefunden. Installieren mit: brew install ffmpeg"
+    )
 
 
 def probe_media(path: str) -> Optional[dict]:
@@ -21,6 +45,8 @@ def probe_media(path: str) -> Optional[dict]:
     _, ffprobe = find_ffmpeg()
     cmd = [
         ffprobe, "-v", "quiet",
+        "-analyzeduration", "5000000",
+        "-probesize", "5000000",
         "-print_format", "json",
         "-show_streams", "-show_format",
         path,
@@ -86,9 +112,15 @@ def format_time(seconds: float, show_frames: bool = False, fps: float = 25.0) ->
 
 
 SUPPORTED_EXTENSIONS = {
+    # Video
     ".mp4", ".mov", ".mkv", ".avi", ".wmv", ".flv",
     ".m4v", ".webm", ".ts", ".mts", ".m2ts",
+    ".mpg", ".mpeg", ".m2v", ".vob", ".3gp", ".3g2",
+    ".divx", ".f4v", ".rm", ".rmvb", ".ogv", ".hevc",
+    # Audio
     ".mp3", ".aac", ".wav", ".flac", ".m4a", ".ogg",
+    ".wma", ".opus", ".mp2", ".ac3", ".dts", ".ra",
+    ".amr", ".aiff", ".aif", ".ape", ".mka",
 }
 
 

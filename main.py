@@ -1,9 +1,31 @@
 import sys
-from PyQt6.QtWidgets import QApplication
+import traceback
+from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtGui import QPalette, QColor
 from PyQt6.QtCore import Qt
 
 from editor.main_window import MainWindow
+
+
+class Application(QApplication):
+    """QApplication-Unterklasse, die Python-Exceptions in Slots abfängt.
+
+    In PyQt6 >= 6.x führt eine unbehandelte Exception in einem Slot zu
+    QMessageLogger::fatal() → abort(). Durch Überschreiben von notify()
+    werden alle solchen Exceptions als Fehlerdialog angezeigt.
+    """
+
+    def notify(self, obj, event):
+        try:
+            return super().notify(obj, event)
+        except Exception:
+            msg = traceback.format_exc()
+            QMessageBox.critical(
+                None,
+                "Unerwarteter Fehler",
+                f"Ein Fehler ist aufgetreten:\n\n{msg}",
+            )
+            return False
 
 
 DARK_STYLE = """
@@ -222,7 +244,7 @@ QToolTip {
 
 
 def main():
-    app = QApplication(sys.argv)
+    app = Application(sys.argv)
     app.setApplicationName("VideoDeathCutter")
     app.setOrganizationName("VideoDeathCutter")
     app.setStyleSheet(DARK_STYLE)

@@ -628,11 +628,13 @@ class TimelineWidget(QWidget):
         return self._canvas.selected_clip()
 
     def find_clip_at(self, time: float) -> Optional[TimelineClip]:
-        """Return the first video clip (track 0) that covers the given time."""
+        """Return the clip covering the given time (video tracks preferred)."""
+        best = None
         for clip in self._canvas.clips():
-            if clip.track == 0 and clip.start_time <= time < clip.end_time:
-                return clip
-        return None
+            if clip.start_time <= time < clip.end_time:
+                if best is None or clip.track < best.track:
+                    best = clip
+        return best
 
     # ------------------------------------------------------------------ zoom
 
